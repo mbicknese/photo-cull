@@ -30,7 +30,7 @@ from .image_processing import (
     prepare_representations,
 )
 from .models import BurstComparisonEntry, IndividualAnalysis, PhotoResult
-from .scoring import apply_burst_adjustment, clamp_score, score_to_stars
+from .scoring import apply_burst_adjustment, clamp_score, reconcile_potential, score_to_stars
 from .vision import (
     MLXVisionModel,
     PROMPT_VERSION,
@@ -229,6 +229,14 @@ def run(
                 result.individual = individual
                 cache.set(file_hash, cache_key, individual.to_dict())
                 cache_note = ""
+
+            # The model's self-reported `potential` is asked to already reflect
+            # nonfixable defects (sharpness/moment), but numeric self-scoring is
+            # unreliable even with explicit prompt guidance -- reconcile it
+            # against the model's own dimension scores as a hard backstop
+            # (applied on every run, including cache hits, so a formula tweak
+            # doesn't require invalidating the cache).
+            result.individual.potential = reconcile_potential(result.individual)
 
             # --- Embedding (cached separately; independent of prompt/model config) ---
             if embedding_model is not None:

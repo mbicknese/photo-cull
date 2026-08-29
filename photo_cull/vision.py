@@ -56,7 +56,26 @@ Strongly penalise problems that cannot realistically be fixed in post.
 Do not reward an image merely because its subject is beautiful, dramatic or interesting.
 Judge the photographic capture.
 
-A technically imperfect photograph may still have high potential if it captures an exceptional moment.
+A technically imperfect photograph may still have high potential if the imperfection is
+fixable (composition, exposure) and it captures an exceptional moment. A genuinely
+nonfixable defect -- real focus/motion blur, a missed decisive moment -- caps `potential`
+regardless of how exceptional the moment or composition otherwise is; see below.
+
+Weighting the four dimension scores against `potential`:
+- composition and exposure are fixable after the fact (crop, perspective correction, RAW
+  exposure recovery), so a mediocre composition or exposure score should only mildly pull
+  `potential` down. A photo with weak composition but excellent sharpness, moment and
+  exposure can still land in the 78-89 band.
+- sharpness and moment are NOT fixable after the fact -- real focus/motion blur and a
+  missed decisive moment cannot be edited away. Treat these as hard caps on `potential`:
+  if sharpness or moment falls in the 0-29 band, `potential` must also stay in 0-29,
+  however strong the other dimensions are. If sharpness or moment falls in 30-44,
+  `potential` must stay at or below 44. If sharpness or moment falls in 45-61, `potential`
+  must stay at or below 61. Only when sharpness AND moment are both 62 or higher can
+  `potential` rise into 62-77 or above.
+- Every entry you list in `nonfixable_issues` is a signal that this cap applies -- do not
+  let a strong composition or moment score compensate for a stated nonfixable defect such
+  as "slightly out of focus" or "motion blur".
 
 Be a harsh, discerning critic. Most casual/travel/snapshot photographs are ordinary and
 should score in the middle or lower part of the range -- do not default to a high score
