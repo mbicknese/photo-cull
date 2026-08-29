@@ -99,7 +99,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: not a directory: {options.path}", file=sys.stderr)
         return 2
 
-    return run(options)
+    try:
+        return run(options)
+    except KeyboardInterrupt:
+        print("\nStopping: interrupted by user.", file=sys.stderr, flush=True)
+        return 130
 
 
 if __name__ == "__main__":

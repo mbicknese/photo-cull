@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -68,6 +69,30 @@ class RunStats:
     failures: int = 0
     burst_groups: int = 0
     standalone: int = 0
+
+
+def _print_analyzing(message: str) -> bool:
+    """Print the in-progress "analyzing" message.
+
+    On an interactive TTY, the line is printed without a trailing newline
+    so it can be overwritten in place once the result is known. Returns
+    True in that case, so the caller knows to overwrite rather than print
+    a fresh line for the result.
+    """
+    if sys.stdout.isatty():
+        print(message, end="", flush=True)
+        return True
+    print(message, flush=True)
+    return False
+
+
+def _print_result(message: str, overwrite: bool) -> None:
+    """Print a result line, overwriting a preceding in-progress line if
+    `overwrite` is True and stdout is an interactive TTY."""
+    if overwrite and sys.stdout.isatty():
+        print(f"\r\x1b[K{message}", flush=True)
+    else:
+        print(message, flush=True)
 
 
 def _config_key(model_name: str) -> str:
@@ -140,88 +165,97 @@ def run(
     exiftool_ok = metadata.exiftool_available()
 
     total_pairs = len(discovery.pairs)
-    for idx, pair in enumerate(discovery.pairs, start=1):
-        progress = f"[{idx}/{total_pairs}] {pair.stem}"
-        result = PhotoResult(stem=pair.stem, jpeg_path=pair.jpeg_path, raf_path=pair.raf_path)
-        results[pair.stem] = result
+    try:
+        for idx, pair in enumerate(discovery.pairs, start=1):
+            progress = f"[{idx}/{total_pairs}] {pair.stem}"
+            result = PhotoResult(stem=pair.stem, jpeg_path=pair.jpeg_path, raf_path=pair.raf_path)
+            results[pair.stem] = result
 
-        if not pair.has_jpeg:
-            result.status = "skipped"
-            result.note = "no JPEG available for visual scoring"
-            print(f"{progress}: skipped (no JPEG)", flush=True)
-            continue
+            if not pair.has_jpeg:
+                result.status = "skipped"
+                result.note = "no JPEG available for visual scoring"
+                print(f"{progress}: skipped (no JPEG)", flush=True)
+                continue
 
-        sidecar_target = pair.sidecar_target
-        existing_rating = None
-        if exiftool_ok and sidecar_target is not None:
-            xmp_path = metadata.xmp_sidecar_path(sidecar_target)
+            sidecar_target = pair.sidecar_target
+            existing_rating = None
+            if exiftool_ok and sidecar_target is not None:
+                xmp_path = metadata.xmp_sidecar_path(sidecar_target)
+                try:
+                    existing_rating = metadata.read_existing_rating(xmp_path)
+                except metadata.ExifToolNotFoundError as exc:
+                    logger.warning("Could not read existing rating for %s: %s", pair.stem, exc)
+
+            result.existing_rating = existing_rating
+
+            should_recompute = options.force or options.overwrite_ratings
+            if existing_rating is not None and not should_recompute:
+                result.status = "skipped"
+                result.rating = existing_rating
+                result.note = "existing rating preserved"
+                print(f"{progress}: skipped (existing rating {existing_rating})", flush=True)
+                continue
+
+            # --- Individual analysis (cached by JPEG content hash) ---
             try:
-                existing_rating = metadata.read_existing_rating(xmp_path)
-            except metadata.ExifToolNotFoundError as exc:
-                logger.warning("Could not read existing rating for %s: %s", pair.stem, exc)
-
-        result.existing_rating = existing_rating
-
-        should_recompute = options.force or options.overwrite_ratings
-        if existing_rating is not None and not should_recompute:
-            result.status = "skipped"
-            result.rating = existing_rating
-            result.note = "existing rating preserved"
-            print(f"{progress}: skipped (existing rating {existing_rating})", flush=True)
-            continue
-
-        # --- Individual analysis (cached by JPEG content hash) ---
-        try:
-            file_hash = compute_file_hash(pair.jpeg_path)
-        except OSError as exc:
-            result.status = "failed"
-            result.error = f"could not read JPEG: {exc}"
-            logger.warning("Failed %s: %s", pair.stem, result.error)
-            print(f"{progress}: failed ({result.error})", flush=True)
-            continue
-
-        result.capture_time = get_capture_time(pair.jpeg_path)
-
-        cache_key = _config_key(options.model)
-        cached_entry = None if options.force else cache.get(file_hash, cache_key)
-
-        if cached_entry is not None:
-            result.individual = _individual_from_cache(cached_entry)
-            cache_note = " (cached)"
-        else:
-            print(f"{progress}: analyzing...", flush=True)
-            try:
-                images = prepare_representations(pair.jpeg_path)
-                individual = vision_model.analyze_individual(images)
-            except (VisionAnalysisError, ImportError, OSError) as exc:
+                file_hash = compute_file_hash(pair.jpeg_path)
+            except OSError as exc:
                 result.status = "failed"
-                result.error = f"vision analysis failed: {exc}"
+                result.error = f"could not read JPEG: {exc}"
                 logger.warning("Failed %s: %s", pair.stem, result.error)
                 print(f"{progress}: failed ({result.error})", flush=True)
                 continue
-            result.individual = individual
-            cache.set(file_hash, cache_key, individual.to_dict())
-            cache_note = ""
 
-        # --- Embedding (cached separately; independent of prompt/model config) ---
-        if embedding_model is not None:
-            embed_key = _embedding_config_key(embedding_model)
-            cached_embedding = cache.get(file_hash, embed_key)
-            if cached_embedding is not None:
-                result_embedding = cached_embedding.get("vector")
+            result.capture_time = get_capture_time(pair.jpeg_path)
+
+            cache_key = _config_key(options.model)
+            cached_entry = None if options.force else cache.get(file_hash, cache_key)
+
+            analyzing_printed = False
+            if cached_entry is not None:
+                result.individual = _individual_from_cache(cached_entry)
+                cache_note = " (cached)"
             else:
+                analyzing_printed = _print_analyzing(f"{progress}: analyzing...")
                 try:
-                    whole_image = prepare_representations(pair.jpeg_path)[0]
-                    vector = embedding_model.embed(whole_image)
-                    result_embedding = vector.tolist()
-                    cache.set(file_hash, embed_key, {"vector": result_embedding})
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning("Embedding failed for %s: %s", pair.stem, exc)
-                    result_embedding = None
-            result.embedding = result_embedding
+                    images = prepare_representations(pair.jpeg_path)
+                    individual = vision_model.analyze_individual(images)
+                except (VisionAnalysisError, ImportError, OSError) as exc:
+                    result.status = "failed"
+                    result.error = f"vision analysis failed: {exc}"
+                    logger.warning("Failed %s: %s", pair.stem, result.error)
+                    _print_result(f"{progress}: failed ({result.error})", overwrite=analyzing_printed)
+                    continue
+                result.individual = individual
+                cache.set(file_hash, cache_key, individual.to_dict())
+                cache_note = ""
 
-        result.status = "ok"
-        print(f"{progress}: potential={result.individual.potential}{cache_note}", flush=True)
+            # --- Embedding (cached separately; independent of prompt/model config) ---
+            if embedding_model is not None:
+                embed_key = _embedding_config_key(embedding_model)
+                cached_embedding = cache.get(file_hash, embed_key)
+                if cached_embedding is not None:
+                    result_embedding = cached_embedding.get("vector")
+                else:
+                    try:
+                        whole_image = prepare_representations(pair.jpeg_path)[0]
+                        vector = embedding_model.embed(whole_image)
+                        result_embedding = vector.tolist()
+                        cache.set(file_hash, embed_key, {"vector": result_embedding})
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning("Embedding failed for %s: %s", pair.stem, exc)
+                        result_embedding = None
+                result.embedding = result_embedding
+
+            result.status = "ok"
+            _print_result(
+                f"{progress}: potential={result.individual.potential}{cache_note}",
+                overwrite=analyzing_printed,
+            )
+    except KeyboardInterrupt:
+        cache.save()
+        print("\nStopping: interrupted by user. Progress so far has been saved.", file=sys.stderr, flush=True)
+        return 130
 
     cache.save()
 
